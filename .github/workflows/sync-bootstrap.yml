@@ -1,0 +1,51 @@
+name: Sync bootstrap.json
+
+on:
+  schedule:
+    # Hourly at minute 17 (off-peak, avoids midnight rush of cron jobs)
+    - cron: '17 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch fresh bootstrap.json
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 15 https://inhive.ru/api/bootstrap.json -o new.json
+
+          # Sanity: must have all 5 required fields, encrypted_payload non-trivial.
+          jq -e 'has("version") and has("key_version") and has("updated_at") and has("encrypted_payload") and has("signature") and (.encrypted_payload | length) > 100' new.json > /dev/null
+
+      - name: Skip if encrypted_payload unchanged
+        id: diff
+        run: |
+          NEW=$(jq -r '.encrypted_payload' new.json)
+          OLD=$(jq -r '.encrypted_payload' bootstrap.json 2>/dev/null || echo '')
+          if [ "$NEW" = "$OLD" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "payload unchanged — no-op"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            SHORT=$(echo -n "$NEW" | sha256sum | cut -c1-12)
+            echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit & push
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          mv new.json bootstrap.json
+          git config user.name "inhive-bootstrap-sync"
+          git config user.email "bot@inhive.ru"
+          git add bootstrap.json
+          git commit -m "Sync bootstrap.json — payload ${{ steps.diff.outputs.short }}"
+          git push
